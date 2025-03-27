@@ -13,7 +13,7 @@ Advanced hash-based malware detection system written in Python.
 
 ## Installation
 ```bash
-pip install git+https://github.com/yourusername/PyDefender.git
+pip install git+https://github.com/mukesh-root/PyDefender
 ```
 
 ## Usage
