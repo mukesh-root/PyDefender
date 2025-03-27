@@ -16,6 +16,7 @@ import mmap
 import math
 import stat
 import hashlib
+import platform
 from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
@@ -93,35 +94,57 @@ class PyDefenderEngine:
         return entropy
 
     def analyze_file(self, file_path: str) -> Optional[ThreatReport]:
-        """Core file analysis engine"""
+        """Core file analysis engine with enhanced error handling"""
         try:
             path = Path(file_path)
-            if not path.is_file():
+            
+            # Basic validation checks
+            if not path.exists():
+                print(f"[!] File not found: {file_path}", file=sys.stderr)
                 return None
                 
-            # Skip large files
-            if path.stat().st_size > DETECTION_PARAMS['thresholds']['max_size']:
+            if not path.is_file():
+                print(f"[!] Not a regular file: {file_path}", file=sys.stderr)
+                return None
+                
+            file_size = path.stat().st_size
+            
+            # Handle special cases
+            if file_size == 0:
+                return None  # Silently skip empty files
+                
+            if file_size > DETECTION_PARAMS['thresholds']['max_size']:
+                print(f"[!] Skipping large file: {file_path} ({file_size/1024/1024:.2f} MB)")
                 return None
                 
             indicators = []
             threat_score = 0
             
-            # Name/extension analysis
+            # Filename analysis
             filename = path.name.lower()
             if any(risk in filename for risk in DETECTION_PARAMS['risk_indicators']['names']):
                 indicators.append("Suspicious filename")
                 threat_score += 25
                 
             if path.suffix.lower() in DETECTION_PARAMS['risk_indicators']['extensions']:
-                indicators.append("Risky extension") 
+                indicators.append("Risky extension")
                 threat_score += 20
                 
-            # Content analysis
-            with path.open('rb') as f:
-                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                    sample = mm.read(4096)
-                    
-                    # Entropy check
+            # Content analysis with robust file handling
+            try:
+                with path.open('rb') as f:
+                    # Use optimal reading strategy based on file size
+                    if file_size < 4096:
+                        sample = f.read()  # Read entire small file
+                    else:
+                        try:
+                            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                                sample = mm.read(4096)  # Read first 4KB of large file
+                        except ValueError as ve:
+                            print(f"[!] MMAP failed for {file_path}: {str(ve)}")
+                            sample = f.read(4096)  # Fallback to regular read
+                            
+                    # Entropy analysis
                     entropy = self._calculate_entropy(sample)
                     if entropy > DETECTION_PARAMS['thresholds']['high_entropy']:
                         indicators.append(f"High entropy ({entropy:.2f})")
@@ -130,9 +153,13 @@ class PyDefenderEngine:
                     # Pattern matching
                     for ptype, patterns in DETECTION_PARAMS['suspicious_patterns'].items():
                         if any(p in sample for p in patterns):
-                            indicators.append(f"{ptype} pattern")
+                            indicators.append(f"{ptype} pattern detected")
                             threat_score += 40
                             
+            except PermissionError:
+                print(f"[!] Permission denied: {file_path}", file=sys.stderr)
+                return None
+                
             # Hash calculation
             hashes = {
                 'md5': self._hash_file(path, hashlib.md5()),
@@ -159,18 +186,18 @@ class PyDefenderEngine:
                 )
                 
         except Exception as e:
-            print(f"[!] Error scanning {file_path}: {e}", file=sys.stderr)
+            print(f"[!] Unexpected error scanning {file_path}: {str(e)}", file=sys.stderr)
         return None
         
     def _hash_file(self, path: Path, hasher) -> str:
-        """Generate file hash"""
+        """Generate file hash using specified algorithm"""
         with path.open('rb') as f:
             for chunk in iter(lambda: f.read(8192), b''):
                 hasher.update(chunk)
         return hasher.hexdigest()
         
     def _classify_file(self, data: bytes) -> str:
-        """Determine file type"""
+        """Determine file type from content"""
         if not data:
             return "Unknown"
             
@@ -210,7 +237,7 @@ class PyDefenderCLI:
         # Output results
         self._show_results()
         
-        # Generate report if requested
+        # Generate report if requested or threats found
         if report_file or self.findings:
             output_file = report_file or f"pydefender_report_{int(time.time())}.json"
             self._generate_report(output_file)
@@ -227,10 +254,15 @@ class PyDefenderCLI:
             self.findings.append(result)
             
     def _process_directory(self, directory: str):
-        """Recursive directory scan"""
+        """Recursively scan directory"""
         for root, _, files in os.walk(directory):
             for file in files:
-                self._process_file(os.path.join(root, file))
+                file_path = os.path.join(root, file)
+                try:
+                    self._process_file(file_path)
+                except Exception as e:
+                    print(f"[!] Error processing {file_path}: {str(e)}", file=sys.stderr)
+                    continue
                 
     def _show_results(self):
         """Display findings in console"""
@@ -240,10 +272,13 @@ class PyDefenderCLI:
             
         print("\n[!] THREAT DETECTIONS:")
         print("=" * 70)
+        
+        # Sort by threat score (descending)
         for threat in sorted(self.findings, key=lambda x: x.threat_score, reverse=True):
             print(f"\nFile: {threat.file_path}")
             print(f"Type: {threat.file_type} | Confidence: {threat.threat_score}/100")
-            print(f"Entropy: {threat.entropy:.2f} | Hashes:")
+            print(f"Entropy: {threat.entropy:.2f}")
+            print("Hashes:")
             print(f"  MD5:    {threat.hashes['md5']}")
             print(f"  SHA1:   {threat.hashes['sha1']}")
             print("Indicators:")
@@ -251,7 +286,7 @@ class PyDefenderCLI:
                 print(f"  - {indicator}")
                 
     def _generate_report(self, output_path: str):
-        """Create JSON report file"""
+        """Generate JSON report file"""
         report = {
             "metadata": {
                 "scanner": "PyDefender",
