@@ -13,7 +13,7 @@ Advanced malware detection system with multi-layered scanning.
 
 ## Installation
 ```bash
-pip install git+https://github.com/yourusername/PyDefender.git
+pip install git+https://github.com/mukesh-root/PyDefender.git
 ```
 
 ## Usage
